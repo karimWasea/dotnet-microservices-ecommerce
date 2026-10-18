@@ -1,0 +1,3 @@
+CREATE DATABASE productdb;
+CREATE DATABASE userdb;
+CREATE DATABASE orderdb;

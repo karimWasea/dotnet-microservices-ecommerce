@@ -1,0 +1,425 @@
+openapi: 3.0.3
+info:
+  title: ProductService.Api | v1
+  description: Product catalog microservice built with DDD (Aggregate Root), CQRS, and MediatR.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5001
+    description: Local Development & Docker Compose
+
+tags:
+  - name: Products
+    description: Product catalog operations (Catalog bounded context)
+
+paths:
+  /api/products:
+    post:
+      tags:
+        - Products
+      summary: Create a new product
+      operationId: CreateProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductRequest'
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location:
+              description: URI of the created product
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '409':
+          description: A product with the same SKU already exists
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Domain rule violation
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+    get:
+      tags:
+        - Products
+      summary: List active products with filtering, sorting, and pagination
+      operationId: ListProducts
+      parameters:
+        - name: search
+          in: query
+          description: Case-insensitive substring search in Name or Description
+          required: false
+          schema:
+            type: string
+        - name: category
+          in: query
+          description: Filter by exact category (case-insensitive)
+          required: false
+          schema:
+            type: string
+        - name: minPrice
+          in: query
+          description: Minimum product price (inclusive)
+          required: false
+          schema:
+            type: number
+            format: decimal
+        - name: maxPrice
+          in: query
+          description: Maximum product price (inclusive)
+          required: false
+          schema:
+            type: number
+            format: decimal
+        - name: sortBy
+          in: query
+          description: Field to sort by (name, price, createdAt)
+          required: false
+          schema:
+            type: string
+            enum: [name, price, createdAt]
+            default: createdAt
+        - name: sortDir
+          in: query
+          description: Sort direction (asc, desc)
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: page
+          in: query
+          description: Page number (1-based, default 1)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: Items per page (default 20, max 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedResponseOfProductResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+
+  /api/products/{id}:
+    get:
+      tags:
+        - Products
+      summary: Get an active product by ID
+      operationId: GetProductById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Product UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '404':
+          description: Product not found or inactive
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+    put:
+      tags:
+        - Products
+      summary: Update an existing product's details and price
+      operationId: UpdateProduct
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Product UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProductRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '404':
+          description: Product not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Optimistic concurrency conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Domain rule violation (for example, product is inactive)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+    delete:
+      tags:
+        - Products
+      summary: Deactivate a product (soft delete, idempotent)
+      operationId: DeactivateProduct
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Product UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Product deactivated (or was already inactive)
+        '404':
+          description: Product not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/products/{id}/activate:
+    post:
+      tags:
+        - Products
+      summary: Activate a product (idempotent)
+      operationId: ActivateProduct
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Product UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Product activated (or was already active)
+        '404':
+          description: Product not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+components:
+  schemas:
+    CreateProductRequest:
+      type: object
+      required:
+        - name
+        - sku
+        - price
+        - category
+      properties:
+        name:
+          type: string
+          example: "Mechanical Keyboard"
+        description:
+          type: string
+          nullable: true
+          example: "Wireless RGB mechanical keyboard with tactile switches"
+        sku:
+          type: string
+          example: "KB-MECH-001"
+        price:
+          type: number
+          format: decimal
+          example: 129.99
+        category:
+          type: string
+          example: "Peripherals"
+
+    UpdateProductRequest:
+      type: object
+      required:
+        - name
+        - price
+        - category
+      properties:
+        name:
+          type: string
+          example: "Mechanical Keyboard Pro"
+        description:
+          type: string
+          nullable: true
+          example: "Updated wireless RGB mechanical keyboard"
+        price:
+          type: number
+          format: decimal
+          example: 139.99
+        category:
+          type: string
+          example: "Peripherals"
+        version:
+          type: integer
+          format: int64
+          nullable: true
+          description: Optional PostgreSQL xmin concurrency version token (or send via If-Match header)
+          example: 742
+
+    ProductResponse:
+      type: object
+      required:
+        - id
+        - name
+        - sku
+        - price
+        - category
+        - createdAtUtc
+        - updatedAtUtc
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "0196ed70-5a2c-7b6a-9870-123456789abc"
+        name:
+          type: string
+          example: "Mechanical Keyboard"
+        description:
+          type: string
+          nullable: true
+          example: "Wireless RGB mechanical keyboard with tactile switches"
+        sku:
+          type: string
+          example: "KB-MECH-001"
+        price:
+          type: number
+          format: decimal
+          example: 129.99
+        category:
+          type: string
+          example: "Peripherals"
+        createdAtUtc:
+          type: string
+          format: date-time
+          example: "2026-10-17T00:45:00Z"
+        updatedAtUtc:
+          type: string
+          format: date-time
+          example: "2026-10-17T00:45:00Z"
+        version:
+          type: integer
+          format: int64
+          description: PostgreSQL xmin optimistic concurrency token
+          example: 742
+
+    PagedResponseOfProductResponse:
+      type: object
+      required:
+        - items
+        - page
+        - pageSize
+        - totalCount
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProductResponse'
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
+        totalCount:
+          type: integer
+          example: 1
+        totalPages:
+          type: integer
+          example: 1
+
+    ProblemDetails:
+      type: object
+      properties:
+        type:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        status:
+          type: integer
+          nullable: true
+        detail:
+          type: string
+          nullable: true
+        instance:
+          type: string
+          nullable: true
+        code:
+          type: string
+          nullable: true
+          description: Machine-readable domain rule violation code (when status is 422)
+
+    HttpValidationProblemDetails:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string

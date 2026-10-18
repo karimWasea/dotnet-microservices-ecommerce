@@ -1,0 +1,131 @@
+@baseUrl = http://localhost:5001
+@missingId = 00000000-0000-0000-0000-000000000001
+
+### 0A. Health Check - Liveness (200 OK)
+GET {{baseUrl}}/health/live
+
+### 0B. Health Check - Readiness (200 OK when Postgres is reachable)
+GET {{baseUrl}}/health/ready
+
+### 1. Create Product (201 Created)
+# @name createProduct
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+X-Correlation-Id: corr-create-001
+
+{
+  "name": "Pro Gaming Mousepad",
+  "description": "Low-friction micro-woven cloth surface gaming mousepad",
+  "sku": "  mp-pro-999  ",
+  "price": 39.99,
+  "category": "Peripherals"
+}
+
+### 2. Create Product - Duplicate SKU (409 Conflict)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "Another Mousepad",
+  "description": "Trying to reuse the same SKU",
+  "sku": "MP-PRO-999",
+  "price": 29.99,
+  "category": "Peripherals"
+}
+
+### 3. Create Product - Validation Error: Empty Name & >2 Decimal Places (400 Bad Request)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "",
+  "description": "Invalid product payload",
+  "sku": "INVALID-001",
+  "price": 19.999,
+  "category": "Peripherals"
+}
+
+### 4. Get Product by ID (200 OK)
+GET {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Accept: application/json
+
+### 5. Get Product by ID - Not Found (404 Not Found)
+GET {{baseUrl}}/api/products/{{missingId}}
+Accept: application/json
+
+### 6. List Products - Default Paging (200 OK)
+GET {{baseUrl}}/api/products?page=1&pageSize=10
+Accept: application/json
+
+### 7. List Products - Filter by Category, Search, Price Range & Sort (200 OK)
+GET {{baseUrl}}/api/products?search=mousepad&category=Peripherals&minPrice=10&maxPrice=100&sortBy=price&sortDir=asc&page=1&pageSize=10
+Accept: application/json
+
+### 8. List Products - Invalid Query Parameters (400 Bad Request)
+GET {{baseUrl}}/api/products?minPrice=200&maxPrice=50&sortBy=invalidField&page=0
+Accept: application/json
+
+### 9. Update Product (200 OK)
+PUT {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "name": "Pro Gaming Mousepad XL",
+  "description": "Updated XL low-friction gaming mousepad",
+  "price": 44.99,
+  "category": "Peripherals",
+  "version": {{createProduct.response.body.$.version}}
+}
+
+### 10. Update Product - Validation Error (400 Bad Request)
+PUT {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "name": "Pro Gaming Mousepad XL",
+  "description": "Negative price test",
+  "price": -10.00,
+  "category": "Peripherals"
+}
+
+### 11. Update Product - Not Found (404 Not Found)
+PUT {{baseUrl}}/api/products/{{missingId}}
+Content-Type: application/json
+
+{
+  "name": "Non-existent Product",
+  "description": "Should return 404",
+  "price": 19.99,
+  "category": "Peripherals"
+}
+
+### 12. Deactivate Product - Soft Delete (204 No Content)
+DELETE {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+
+### 13. Deactivate Already-Inactive Product - Idempotent (204 No Content)
+DELETE {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+
+### 14. Get Inactive Product - Returns 404 Not Found
+GET {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Accept: application/json
+
+### 15. Update Inactive Product - Domain Rule Violation (422 Unprocessable Entity, code = product.inactive)
+PUT {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "name": "Should Fail With 422",
+  "description": "Cannot update an inactive product",
+  "price": 49.99,
+  "category": "Peripherals"
+}
+
+### 16. Activate Product (204 No Content)
+POST {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}/activate
+
+### 17. Activate Already-Active Product - Idempotent (204 No Content)
+POST {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}/activate
+
+### 18. Get Reactivated Product (200 OK)
+GET {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
+Accept: application/json
