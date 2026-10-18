@@ -1,0 +1,13 @@
+**/.git
+**/.vs
+**/.vscode
+**/bin
+**/obj
+**/TestResults
+**/.keys
+*.pem
+.env
+docs/
+tests/
+*.md
+*.user

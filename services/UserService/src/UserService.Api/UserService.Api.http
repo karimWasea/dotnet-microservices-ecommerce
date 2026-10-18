@@ -1,0 +1,93 @@
+@UserService_HostAddress = http://localhost:5002
+@AccessToken = paste-access-token-here
+@AdminAccessToken = paste-admin-access-token-here
+@RefreshToken = paste-refresh-token-here
+@UserId = 00000000-0000-0000-0000-000000000000
+
+### 1. Liveness Health Check
+GET {{UserService_HostAddress}}/health/live
+
+### 2. Readiness Health Check
+GET {{UserService_HostAddress}}/health/ready
+
+### 3. Get JWKS Public Keys
+GET {{UserService_HostAddress}}/.well-known/jwks.json
+Accept: application/json
+
+### 4. Register a New Customer
+POST {{UserService_HostAddress}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@ecommerce.local",
+  "password": "Customer@123456!",
+  "displayName": "Alice Customer"
+}
+
+### 5. Login as Customer
+POST {{UserService_HostAddress}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@ecommerce.local",
+  "password": "Customer@123456!"
+}
+
+### 6. Login as Seeded Admin (Development)
+POST {{UserService_HostAddress}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@ecommerce.local",
+  "password": "Admin@123456!"
+}
+
+### 7. Get Current User Profile (/api/users/me)
+GET {{UserService_HostAddress}}/api/users/me
+Authorization: Bearer {{AccessToken}}
+Accept: application/json
+
+### 8. Rotate Refresh Token (/api/auth/refresh)
+POST {{UserService_HostAddress}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{RefreshToken}}"
+}
+
+### 9. Change Password (/api/users/me/change-password)
+POST {{UserService_HostAddress}}/api/users/me/change-password
+Authorization: Bearer {{AccessToken}}
+Content-Type: application/json
+
+{
+  "currentPassword": "Customer@123456!",
+  "newPassword": "NewSecure@123456!"
+}
+
+### 10. Revoke Refresh Token / Logout (/api/auth/revoke)
+POST {{UserService_HostAddress}}/api/auth/revoke
+Authorization: Bearer {{AccessToken}}
+Content-Type: application/json
+
+{
+  "refreshToken": "{{RefreshToken}}"
+}
+
+### 11. Admin: List Users (/api/users)
+GET {{UserService_HostAddress}}/api/users?page=1&pageSize=20&role=Customer&isActive=true
+Authorization: Bearer {{AdminAccessToken}}
+Accept: application/json
+
+### 12. Admin: Get User by ID (/api/users/{id})
+GET {{UserService_HostAddress}}/api/users/{{UserId}}
+Authorization: Bearer {{AdminAccessToken}}
+Accept: application/json
+
+### 13. Admin: Deactivate User (/api/users/{id}/deactivate)
+POST {{UserService_HostAddress}}/api/users/{{UserId}}/deactivate
+Authorization: Bearer {{AdminAccessToken}}
+
+### 14. Admin: Activate User (/api/users/{id}/activate)
+POST {{UserService_HostAddress}}/api/users/{{UserId}}/activate
+Authorization: Bearer {{AdminAccessToken}}

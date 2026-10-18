@@ -1,4 +1,4 @@
-name: ProductService CI
+name: ECommerce Microservices CI
 
 on:
   push:
@@ -12,7 +12,6 @@ env:
   DOTNET_NOLOGO: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
-  SOLUTION_PATH: services/ProductService/ProductService.slnx
 
 jobs:
   build-and-test:
@@ -36,17 +35,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Restore dependencies
-        run: dotnet restore ${{ env.SOLUTION_PATH }}
+      - name: Restore ProductService
+        run: dotnet restore services/ProductService/ProductService.slnx
 
-      - name: Build solution (Release)
-        run: dotnet build ${{ env.SOLUTION_PATH }} --configuration Release --no-restore
+      - name: Build ProductService (Release)
+        run: dotnet build services/ProductService/ProductService.slnx --configuration Release --no-restore
 
-      - name: Run Unit & Architecture Tests
+      - name: Run ProductService Unit & Architecture Tests
         run: dotnet test services/ProductService/tests/ProductService.UnitTests/ProductService.UnitTests.csproj --configuration Release --no-build --verbosity normal
 
-      - name: Run Integration Tests (Testcontainers PostgreSQL 17)
+      - name: Run ProductService Integration Tests (Testcontainers PostgreSQL 17)
         run: dotnet test services/ProductService/tests/ProductService.IntegrationTests/ProductService.IntegrationTests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Restore UserService
+        run: dotnet restore services/UserService/UserService.slnx
+
+      - name: Build UserService (Release)
+        run: dotnet build services/UserService/UserService.slnx --configuration Release --no-restore
+
+      - name: Run UserService Unit & Architecture Tests
+        run: dotnet test services/UserService/tests/UserService.UnitTests/UserService.UnitTests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Run UserService Integration Tests (Testcontainers PostgreSQL 17)
+        run: dotnet test services/UserService/tests/UserService.IntegrationTests/UserService.IntegrationTests.csproj --configuration Release --no-build --verbosity normal
 
   docker-build:
     name: Validate Docker Build & Compose
@@ -62,3 +73,6 @@ jobs:
 
       - name: Build ProductService Docker image
         run: docker build -t product-service:ci ./services/ProductService
+
+      - name: Build UserService Docker image
+        run: docker build -t user-service:ci ./services/UserService

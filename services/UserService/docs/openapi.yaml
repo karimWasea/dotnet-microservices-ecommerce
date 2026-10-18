@@ -1,0 +1,685 @@
+openapi: 3.0.3
+info:
+  title: UserService.Api | v1
+  description: Identity and authentication microservice built with DDD (User Aggregate Root + RefreshToken Child Entity), CQRS, MediatR, and RS256 JWT + JWKS.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5002
+    description: Local Development & Docker Compose
+
+tags:
+  - name: Auth
+    description: Registration, login, token refresh, logout, and password management
+  - name: Users
+    description: Current user profile and Admin user management
+  - name: Jwks
+    description: JSON Web Key Set (public RSA keys for JWT verification)
+  - name: Health
+    description: Liveness and readiness probes
+
+paths:
+  /api/auth/register:
+    post:
+      tags:
+        - Auth
+      summary: Register a new customer account
+      operationId: RegisterUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterUserRequest'
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location:
+              description: URI of the current user profile (/api/users/me)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '409':
+          description: Email already registered
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Domain rule violation
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '429':
+          description: Rate limit exceeded (max 10 requests per minute per IP)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/auth/login:
+    post:
+      tags:
+        - Auth
+      summary: Authenticate with email and password to receive an access token and refresh token
+      operationId: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '401':
+          description: Invalid email or password (same response for unknown email, wrong password, locked out, or inactive user)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/auth/refresh:
+    post:
+      tags:
+        - Auth
+      summary: Rotate a refresh token and issue a new access token and refresh token pair
+      operationId: RefreshAccessToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshAccessTokenRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '401':
+          description: Invalid, expired, or reused refresh token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Optimistic concurrency conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/auth/logout:
+    post:
+      tags:
+        - Auth
+      summary: Revoke a refresh token (idempotent)
+      operationId: Logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Refresh token revoked (or was unknown/already revoked)
+        '400':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/auth/change-password:
+    post:
+      tags:
+        - Auth
+      summary: Change the authenticated user's password and revoke all refresh tokens
+      operationId: ChangePassword
+      security:
+        - Bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password changed and all refresh tokens revoked
+        '400':
+          description: Validation error (including wrong currentPassword)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '401':
+          description: Missing, invalid, or expired access token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '409':
+          description: Optimistic concurrency conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '422':
+          description: Domain rule violation (user is inactive)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/users/me:
+    get:
+      tags:
+        - Users
+      summary: Get the authenticated user's profile
+      operationId: GetCurrentUser
+      security:
+        - Bearer: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Missing, invalid, or expired access token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '404':
+          description: User not found or inactive
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/users:
+    get:
+      tags:
+        - Users
+      summary: List users with filtering, sorting, and pagination (Admin only)
+      operationId: ListUsers
+      security:
+        - Bearer: []
+      parameters:
+        - name: search
+          in: query
+          description: Case-insensitive substring search in email or displayName
+          required: false
+          schema:
+            type: string
+        - name: role
+          in: query
+          description: Filter by role (Customer or Admin)
+          required: false
+          schema:
+            type: string
+            enum: [Customer, Admin]
+        - name: isActive
+          in: query
+          description: Filter by active status
+          required: false
+          schema:
+            type: boolean
+        - name: sortBy
+          in: query
+          description: Field to sort by (email, displayName, createdAt)
+          required: false
+          schema:
+            type: string
+            enum: [email, displayName, createdAt]
+            default: createdAt
+        - name: sortDir
+          in: query
+          description: Sort direction (asc, desc)
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: page
+          in: query
+          description: Page number (1-based, default 1)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: Items per page (default 20, max 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedResponseOfUserResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/HttpValidationProblemDetails'
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Forbidden (requires Admin role)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/users/{id}/deactivate:
+    post:
+      tags:
+        - Users
+      summary: Deactivate a user and revoke all their refresh tokens (Admin only, idempotent)
+      operationId: DeactivateUser
+      security:
+        - Bearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: User UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: User deactivated (or was already inactive)
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Forbidden (requires Admin role)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '404':
+          description: User not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /api/users/{id}/activate:
+    post:
+      tags:
+        - Users
+      summary: Activate a user (Admin only, idempotent)
+      operationId: ActivateUser
+      security:
+        - Bearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: User UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: User activated (or was already active)
+        '401':
+          description: Unauthorized
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '403':
+          description: Forbidden (requires Admin role)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '404':
+          description: User not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+
+  /.well-known/jwks.json:
+    get:
+      tags:
+        - Jwks
+      summary: Get the public JSON Web Key Set (JWKS) used to verify RS256 access tokens
+      operationId: GetJwks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JwksResponse'
+
+  /health/live:
+    get:
+      tags:
+        - Health
+      summary: Liveness check
+      operationId: HealthLive
+      responses:
+        '200':
+          description: Healthy
+
+  /health/ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness check (verifies PostgreSQL connectivity)
+      operationId: HealthReady
+      responses:
+        '200':
+          description: Ready
+        '503':
+          description: Unhealthy
+
+components:
+  securitySchemes:
+    Bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: RS256 JWT access token issued by UserService (/api/auth/login or /api/auth/refresh)
+
+  schemas:
+    RegisterUserRequest:
+      type: object
+      required:
+        - email
+        - password
+        - displayName
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: "alice@example.com"
+        password:
+          type: string
+          minLength: 10
+          maxLength: 128
+          example: "Str0ngPass!2026"
+        displayName:
+          type: string
+          maxLength: 100
+          example: "Alice Johnson"
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: "alice@example.com"
+        password:
+          type: string
+          example: "Str0ngPass!2026"
+
+    RefreshAccessTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          example: "dGhpcy1pcy1hLTMtYnl0ZS1jcnlwdG8tcmFuZG9tLXRva2Vu"
+
+    LogoutRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          example: "dGhpcy1pcy1hLTMtYnl0ZS1jcnlwdG8tcmFuZG9tLXRva2Vu"
+
+    ChangePasswordRequest:
+      type: object
+      required:
+        - currentPassword
+        - newPassword
+      properties:
+        currentPassword:
+          type: string
+          example: "Str0ngPass!2026"
+        newPassword:
+          type: string
+          minLength: 10
+          maxLength: 128
+          example: "NewerStr0ngPass!2026"
+
+    TokenResponse:
+      type: object
+      required:
+        - accessToken
+        - tokenType
+        - expiresInSeconds
+        - refreshToken
+      properties:
+        accessToken:
+          type: string
+          example: "eyJhbGciOiJSUzI1NiIsImtpZCI6Ij..."
+        tokenType:
+          type: string
+          example: "Bearer"
+        expiresInSeconds:
+          type: integer
+          example: 900
+        refreshToken:
+          type: string
+          example: "dGhpcy1pcy1hLTMtYnl0ZS1jcnlwdG8tcmFuZG9tLXRva2Vu"
+
+    UserResponse:
+      type: object
+      required:
+        - id
+        - email
+        - displayName
+        - role
+        - isActive
+        - createdAtUtc
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "0196ed70-5a2c-7b6a-9870-123456789abc"
+        email:
+          type: string
+          format: email
+          example: "alice@example.com"
+        displayName:
+          type: string
+          example: "Alice Johnson"
+        role:
+          type: string
+          enum: [Customer, Admin]
+          example: "Customer"
+        isActive:
+          type: boolean
+          example: true
+        createdAtUtc:
+          type: string
+          format: date-time
+          example: "2026-10-19T00:00:00Z"
+        lastLoginAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-10-19T00:05:00Z"
+
+    PagedResponseOfUserResponse:
+      type: object
+      required:
+        - items
+        - page
+        - pageSize
+        - totalCount
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserResponse'
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
+        totalCount:
+          type: integer
+          example: 1
+        totalPages:
+          type: integer
+          example: 1
+
+    JwkItem:
+      type: object
+      required:
+        - kty
+        - use
+        - alg
+        - kid
+        - n
+        - e
+      properties:
+        kty:
+          type: string
+          example: "RSA"
+        use:
+          type: string
+          example: "sig"
+        alg:
+          type: string
+          example: "RS256"
+        kid:
+          type: string
+          example: "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+        n:
+          type: string
+          description: Base64url-encoded RSA modulus
+        e:
+          type: string
+          description: Base64url-encoded RSA public exponent
+          example: "AQAB"
+
+    JwksResponse:
+      type: object
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/JwkItem'
+
+    ProblemDetails:
+      type: object
+      properties:
+        type:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        status:
+          type: integer
+          nullable: true
+        detail:
+          type: string
+          nullable: true
+        instance:
+          type: string
+          nullable: true
+        code:
+          type: string
+          nullable: true
+          description: Machine-readable domain rule violation code (when status is 422)
+
+    HttpValidationProblemDetails:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          properties:
+            errors:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
