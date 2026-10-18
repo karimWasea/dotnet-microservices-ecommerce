@@ -55,6 +55,13 @@ public sealed class ProductDbContext(
         {
             throw new ConflictException("A product with the specified SKU already exists.");
         }
+        catch (Exception)
+        {
+            // Clear tracked entities so that if the Retry policy re-runs the command handler,
+            // the scoped DbContext does not contain stale/duplicate entities from the failed attempt.
+            ChangeTracker.Clear();
+            throw;
+        }
 
         foreach (var aggregate in aggregatesWithEvents)
         {

@@ -14,7 +14,11 @@ public sealed record MonitoringSnapshot(
     long SucceededRequests,
     long FailedRequests,
     long CanceledRequests,
-    long RejectedByCircuitBreakerRequests);
+    long TotalRetryAttempts,
+    long RejectedByCircuitBreakerRequests,
+    long RejectedByBulkheadRequests,
+    int BulkheadActiveRequests,
+    int BulkheadQueuedRequests);
 
 public sealed class ProductMetrics : IDisposable
 {
@@ -27,13 +31,18 @@ public sealed class ProductMetrics : IDisposable
     private readonly Counter<long> _requestsCounter;
     private readonly Histogram<double> _requestDurationMs;
     private readonly Counter<long> _circuitStateChangesCounter;
+    private readonly Counter<long> _retriesCounter;
 
     private long _totalRequests;
     private long _succeededRequests;
     private long _failedRequests;
     private long _canceledRequests;
+    private long _totalRetryAttempts;
     private long _rejectedByCircuitBreakerRequests;
+    private long _rejectedByBulkheadRequests;
     private long _circuitOpenedCount;
+    private int _bulkheadActiveRequests;
+    private int _bulkheadQueuedRequests;
 
     private volatile string _circuitState = "Closed";
     private DateTimeOffset? _lastCircuitStateChangedAtUtc;
@@ -54,6 +63,10 @@ public sealed class ProductMetrics : IDisposable
             "productservice.circuit_breaker.state_changes",
             description: "Number of circuit breaker state transitions.");
 
+        _retriesCounter = _meter.CreateCounter<long>(
+            "productservice.retries.total",
+            description: "Total number of transient failure retry attempts.");
+
         _meter.CreateObservableGauge<int>(
             "productservice.circuit_breaker.state",
             observeValue: () => _circuitState switch
@@ -64,6 +77,16 @@ public sealed class ProductMetrics : IDisposable
                 _ => 0
             },
             description: "Current circuit breaker state (0 = Closed, 1 = HalfOpen, 2 = Open).");
+
+        _meter.CreateObservableGauge<int>(
+            "productservice.bulkhead.active_requests",
+            observeValue: () => Volatile.Read(ref _bulkheadActiveRequests),
+            description: "Number of requests currently executing inside the bulkhead.");
+
+        _meter.CreateObservableGauge<int>(
+            "productservice.bulkhead.queued_requests",
+            observeValue: () => Volatile.Read(ref _bulkheadQueuedRequests),
+            description: "Number of requests currently waiting in the bulkhead queue.");
     }
 
     public string CircuitState => _circuitState;
@@ -92,11 +115,28 @@ public sealed class ProductMetrics : IDisposable
         _requestDurationMs.Record(durationMs, new KeyValuePair<string, object?>("request", requestName), new KeyValuePair<string, object?>("status", "failed"));
     }
 
+    public void RecordRetryAttempt(int attemptNumber, string? reason)
+    {
+        Interlocked.Increment(ref _totalRetryAttempts);
+        _retriesCounter.Add(1, new KeyValuePair<string, object?>("attempt", attemptNumber));
+    }
+
     public void RecordCircuitBreakerRejected(string requestName)
     {
         Interlocked.Increment(ref _rejectedByCircuitBreakerRequests);
         _requestsCounter.Add(1, new KeyValuePair<string, object?>("request", requestName), new KeyValuePair<string, object?>("status", "rejected_circuit_open"));
     }
+
+    public void RecordBulkheadRejected(string requestName)
+    {
+        Interlocked.Increment(ref _rejectedByBulkheadRequests);
+        _requestsCounter.Add(1, new KeyValuePair<string, object?>("request", requestName), new KeyValuePair<string, object?>("status", "rejected_bulkhead_full"));
+    }
+
+    public void IncrementBulkheadQueued() => Interlocked.Increment(ref _bulkheadQueuedRequests);
+    public void DecrementBulkheadQueued() => Interlocked.Decrement(ref _bulkheadQueuedRequests);
+    public void IncrementBulkheadActive() => Interlocked.Increment(ref _bulkheadActiveRequests);
+    public void DecrementBulkheadActive() => Interlocked.Decrement(ref _bulkheadActiveRequests);
 
     public void RecordCircuitOpened(string? failureReason, DateTimeOffset utcNow)
     {
@@ -131,7 +171,11 @@ public sealed class ProductMetrics : IDisposable
         SucceededRequests: Interlocked.Read(ref _succeededRequests),
         FailedRequests: Interlocked.Read(ref _failedRequests),
         CanceledRequests: Interlocked.Read(ref _canceledRequests),
-        RejectedByCircuitBreakerRequests: Interlocked.Read(ref _rejectedByCircuitBreakerRequests));
+        TotalRetryAttempts: Interlocked.Read(ref _totalRetryAttempts),
+        RejectedByCircuitBreakerRequests: Interlocked.Read(ref _rejectedByCircuitBreakerRequests),
+        RejectedByBulkheadRequests: Interlocked.Read(ref _rejectedByBulkheadRequests),
+        BulkheadActiveRequests: Volatile.Read(ref _bulkheadActiveRequests),
+        BulkheadQueuedRequests: Volatile.Read(ref _bulkheadQueuedRequests));
 
     public string FormatPrometheusMetrics()
     {
@@ -147,11 +191,23 @@ public sealed class ProductMetrics : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine("# HELP productservice_circuit_breaker_state Current circuit breaker state (0=Closed, 1=HalfOpen, 2=Open).");
         sb.AppendLine("# TYPE productservice_circuit_breaker_state gauge");
-        sb.AppendLine( string.Create(CultureInfo.InvariantCulture, $"productservice_circuit_breaker_state {stateNumeric}"));
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_circuit_breaker_state {stateNumeric}"));
 
         sb.AppendLine("# HELP productservice_circuit_breaker_opened_total Total times the circuit breaker has tripped open.");
         sb.AppendLine("# TYPE productservice_circuit_breaker_opened_total counter");
         sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_circuit_breaker_opened_total {snapshot.CircuitOpenedCount}"));
+
+        sb.AppendLine("# HELP productservice_retries_total Total transient failure retry attempts.");
+        sb.AppendLine("# TYPE productservice_retries_total counter");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_retries_total {snapshot.TotalRetryAttempts}"));
+
+        sb.AppendLine("# HELP productservice_bulkhead_active_requests Requests currently executing inside the bulkhead.");
+        sb.AppendLine("# TYPE productservice_bulkhead_active_requests gauge");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_bulkhead_active_requests {snapshot.BulkheadActiveRequests}"));
+
+        sb.AppendLine("# HELP productservice_bulkhead_queued_requests Requests currently queued waiting for a bulkhead slot.");
+        sb.AppendLine("# TYPE productservice_bulkhead_queued_requests gauge");
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_bulkhead_queued_requests {snapshot.BulkheadQueuedRequests}"));
 
         sb.AppendLine("# HELP productservice_requests_total Total MediatR requests processed by status.");
         sb.AppendLine("# TYPE productservice_requests_total counter");
@@ -159,6 +215,7 @@ public sealed class ProductMetrics : IDisposable
         sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_requests_total{{status=\"failed\"}} {snapshot.FailedRequests}"));
         sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_requests_total{{status=\"canceled\"}} {snapshot.CanceledRequests}"));
         sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_requests_total{{status=\"rejected_circuit_open\"}} {snapshot.RejectedByCircuitBreakerRequests}"));
+        sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"productservice_requests_total{{status=\"rejected_bulkhead_full\"}} {snapshot.RejectedByBulkheadRequests}"));
 
         return sb.ToString();
     }

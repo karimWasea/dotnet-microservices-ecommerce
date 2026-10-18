@@ -131,9 +131,10 @@ public sealed class ValidatorsAndBehaviorTests
             FailureRatio = 0.5,
             MinimumThroughput = 2,
             SamplingDurationSeconds = 30,
-            BreakDurationSeconds = 30
+            BreakDurationSeconds = 30,
+            MaxRetryAttempts = 0
         };
-        var registry = new CircuitBreakerRegistry(
+        using var registry = new CircuitBreakerRegistry(
             options,
             metrics,
             TimeProvider.System,
@@ -177,9 +178,10 @@ public sealed class ValidatorsAndBehaviorTests
             FailureRatio = 0.5,
             MinimumThroughput = 2,
             SamplingDurationSeconds = 30,
-            BreakDurationSeconds = 30
+            BreakDurationSeconds = 30,
+            MaxRetryAttempts = 2
         };
-        var registry = new CircuitBreakerRegistry(
+        using var registry = new CircuitBreakerRegistry(
             options,
             metrics,
             TimeProvider.System,
@@ -196,7 +198,95 @@ public sealed class ValidatorsAndBehaviorTests
             behavior.Handle(command, notFoundNext, CancellationToken.None));
 
         Assert.Equal("Closed", metrics.CircuitState);
+        Assert.Equal(0, metrics.GetSnapshot().TotalRetryAttempts);
+    }
+
+    [Fact]
+    public async Task RetryPattern_WhenTransientFailureRecoversOnRetry_SucceedsAndRecordsRetryAttempt()
+    {
+        using var metrics = new ProductService.Application.Monitoring.ProductMetrics();
+        var options = new ProductService.Application.Monitoring.CircuitBreakerOptions
+        {
+            FailureRatio = 0.9,
+            MinimumThroughput = 10,
+            MaxRetryAttempts = 2,
+            RetryBaseDelayMs = 5,
+            RetryUseJitter = false
+        };
+        using var registry = new CircuitBreakerRegistry(
+            options,
+            metrics,
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CircuitBreakerRegistry>.Instance);
+        var behavior = new CircuitBreakerBehavior<CreateProductCommand, Guid>(registry, metrics);
+        var command = new CreateProductCommand("Keyboard", "Desc", "KB-001", 99.99m, "Peripherals");
+
+        var attempts = 0;
+        var expectedId = Guid.NewGuid();
+        RequestHandlerDelegate<Guid> flakyNext = _ =>
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                throw new TimeoutException("Transient DB timeout on first attempt.");
+            }
+
+            return Task.FromResult(expectedId);
+        };
+
+        var result = await behavior.Handle(command, flakyNext, CancellationToken.None);
+
+        Assert.Equal(expectedId, result);
+        Assert.Equal(2, attempts);
+        Assert.Equal(1, metrics.GetSnapshot().TotalRetryAttempts);
+    }
+
+    [Fact]
+    public async Task BulkheadPattern_WhenParallelAndQueueSlotsAreFull_ThrowsBulkheadRejectedException()
+    {
+        using var metrics = new ProductService.Application.Monitoring.ProductMetrics();
+        var options = new ProductService.Application.Monitoring.CircuitBreakerOptions
+        {
+            BulkheadMaxParallelization = 1,
+            BulkheadMaxQueuedActions = 1,
+            MaxRetryAttempts = 0
+        };
+        using var registry = new CircuitBreakerRegistry(
+            options,
+            metrics,
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CircuitBreakerRegistry>.Instance);
+        var behavior = new CircuitBreakerBehavior<CreateProductCommand, Guid>(registry, metrics);
+        var command = new CreateProductCommand("Keyboard", "Desc", "KB-001", 99.99m, "Peripherals");
+
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        RequestHandlerDelegate<Guid> blockingNext = async _ =>
+        {
+            firstEntered.TrySetResult();
+            await releaseFirst.Task;
+            return Guid.NewGuid();
+        };
+
+        // 1st request occupies the active slot (BulkheadMaxParallelization = 1)
+        var task1 = behavior.Handle(command, blockingNext, CancellationToken.None);
+        await firstEntered.Task;
+
+        // 2nd request occupies the single queue slot (BulkheadMaxQueuedActions = 1)
+        var task2 = behavior.Handle(command, blockingNext, CancellationToken.None);
+        await Task.Delay(30);
+
+        // 3rd concurrent request exceeds active (1) + queue (1) capacity -> rejected immediately!
+        await Assert.ThrowsAsync<ProductService.Application.Exceptions.BulkheadRejectedException>(() =>
+            behavior.Handle(command, blockingNext, CancellationToken.None));
+
+        Assert.Equal(1, metrics.GetSnapshot().RejectedByBulkheadRequests);
+
+        releaseFirst.SetResult();
+        await Task.WhenAll(task1, task2);
     }
 }
+
 
 

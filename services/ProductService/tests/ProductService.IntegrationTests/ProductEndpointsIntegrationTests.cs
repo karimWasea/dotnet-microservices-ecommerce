@@ -551,6 +551,7 @@ public sealed class ProductEndpointsIntegrationTests(PostgresContainerFixture fi
                 builder.UseSetting("CircuitBreaker:MinimumThroughput", "2");
                 builder.UseSetting("CircuitBreaker:FailureRatio", "0.5");
                 builder.UseSetting("CircuitBreaker:BreakDurationSeconds", "30");
+                builder.UseSetting("CircuitBreaker:MaxRetryAttempts", "0");
                 builder.ConfigureServices(services =>
                 {
                     services.AddScoped<ProductService.Application.Abstractions.IProductReadService, FailingProductReadService>();
@@ -588,6 +589,84 @@ public sealed class ProductEndpointsIntegrationTests(PostgresContainerFixture fi
         Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
     }
 
+    [Fact]
+    public async Task RetryPattern_WhenDownstreamFailsOnceThenSucceeds_Returns200AndIncrementsRetryMetric()
+    {
+        var flakyService = new FlakyProductReadService(failuresBeforeSuccess: 1);
+
+        await using var retryFactory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("ConnectionStrings:ProductDb", fixture.Postgres.GetConnectionString());
+                builder.UseSetting("Database:SeedSampleData", "false");
+                builder.UseSetting("CircuitBreaker:MaxRetryAttempts", "2");
+                builder.UseSetting("CircuitBreaker:RetryBaseDelayMs", "10");
+                builder.UseSetting("CircuitBreaker:MinimumThroughput", "10");
+                builder.ConfigureServices(services =>
+                {
+                    services.AddSingleton<ProductService.Application.Abstractions.IProductReadService>(flakyService);
+                });
+            });
+
+        using var client = retryFactory.CreateClient();
+
+        var response = await client.GetAsync("/api/products");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, flakyService.CallCount);
+
+        var status = await client.GetFromJsonAsync<ProductService.Application.Monitoring.MonitoringSnapshot>(
+            "/monitoring/status");
+        Assert.NotNull(status);
+        Assert.Equal(1, status.TotalRetryAttempts);
+        Assert.Equal("Closed", status.CircuitState);
+    }
+
+    [Fact]
+    public async Task BulkheadPattern_WhenConcurrentRequestsExceedCapacity_Returns429TooManyRequestsWithRetryAfter()
+    {
+        var gate = new BlockingProductReadService();
+
+        await using var bulkheadFactory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("ConnectionStrings:ProductDb", fixture.Postgres.GetConnectionString());
+                builder.UseSetting("Database:SeedSampleData", "false");
+                builder.UseSetting("CircuitBreaker:BulkheadMaxParallelization", "1");
+                builder.UseSetting("CircuitBreaker:BulkheadMaxQueuedActions", "0");
+                builder.UseSetting("CircuitBreaker:MaxRetryAttempts", "0");
+                builder.ConfigureServices(services =>
+                {
+                    services.AddSingleton<ProductService.Application.Abstractions.IProductReadService>(gate);
+                });
+            });
+
+        using var client = bulkheadFactory.CreateClient();
+
+        // 1st request enters the bulkhead (MaxParallelization = 1, MaxQueuedActions = 0) and waits on the gate
+        var inFlightRequest = client.GetAsync("/api/products");
+        await gate.FirstRequestEntered.Task;
+
+        // 2nd concurrent request finds bulkhead full -> immediately returns 429 Too Many Requests + Retry-After
+        var rejectedResponse = await client.GetAsync("/api/products");
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejectedResponse.StatusCode);
+        Assert.True(rejectedResponse.Headers.Contains("Retry-After"));
+
+        var problem = await rejectedResponse.Content.ReadFromJsonAsync<ProblemDetails>();
+        Assert.NotNull(problem);
+        Assert.Equal(429, problem.Status);
+        Assert.Equal("Too Many Concurrent Requests", problem.Title);
+
+        // Release 1st request and verify it completes with 200 OK
+        gate.ReleaseFirstRequest.SetResult();
+        var firstResponse = await inFlightRequest;
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+
+        var status = await client.GetFromJsonAsync<ProductService.Application.Monitoring.MonitoringSnapshot>(
+            "/monitoring/status");
+        Assert.NotNull(status);
+        Assert.Equal(1, status.RejectedByBulkheadRequests);
+    }
+
     private sealed class FailingProductReadService
         : ProductService.Application.Abstractions.IProductReadService
     {
@@ -599,7 +678,50 @@ public sealed class ProductEndpointsIntegrationTests(PostgresContainerFixture fi
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Simulated database outage.");
     }
+
+    private sealed class FlakyProductReadService(int failuresBeforeSuccess)
+        : ProductService.Application.Abstractions.IProductReadService
+    {
+        private int _calls;
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public Task<ProductResponse?> GetActiveByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProductResponse?>(null);
+
+        public Task<PagedResponse<ProductResponse>> ListActiveAsync(
+            ProductService.Application.Products.Queries.ListProducts.ListProductsQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            var current = Interlocked.Increment(ref _calls);
+            if (current <= failuresBeforeSuccess)
+            {
+                throw new InvalidOperationException("Simulated transient glitch.");
+            }
+
+            return Task.FromResult(new PagedResponse<ProductResponse>([], 1, 20, 0, 0));
+        }
+    }
+
+    private sealed class BlockingProductReadService
+        : ProductService.Application.Abstractions.IProductReadService
+    {
+        public TaskCompletionSource FirstRequestEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirstRequest { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<ProductResponse?> GetActiveByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProductResponse?>(null);
+
+        public async Task<PagedResponse<ProductResponse>> ListActiveAsync(
+            ProductService.Application.Products.Queries.ListProducts.ListProductsQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            FirstRequestEntered.TrySetResult();
+            await ReleaseFirstRequest.Task.WaitAsync(cancellationToken);
+            return new PagedResponse<ProductResponse>([], 1, 20, 0, 0);
+        }
+    }
 }
+
 
 
 

@@ -49,6 +49,10 @@ public sealed class GlobalExceptionHandler(
                 StatusCodes.Status422UnprocessableEntity,
                 "Domain Rule Violation",
                 "https://tools.ietf.org/html/rfc9110#section-15.5.21"),
+            BulkheadRejectedException => (
+                StatusCodes.Status429TooManyRequests,
+                "Too Many Concurrent Requests",
+                "https://tools.ietf.org/html/rfc6585#section-4"),
             BrokenCircuitException => (
                 StatusCodes.Status503ServiceUnavailable,
                 "Service Temporarily Unavailable",
@@ -85,6 +89,10 @@ public sealed class GlobalExceptionHandler(
         if (exception is BrokenCircuitException)
         {
             httpContext.Response.Headers.RetryAfter = "15";
+        }
+        else if (exception is BulkheadRejectedException)
+        {
+            httpContext.Response.Headers.RetryAfter = "5";
         }
 
         ProblemDetails problemDetails;
