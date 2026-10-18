@@ -129,3 +129,11 @@ POST {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}/activate
 ### 18. Get Reactivated Product (200 OK)
 GET {{baseUrl}}/api/products/{{createProduct.response.body.$.id}}
 Accept: application/json
+
+### 19. Monitoring - Prometheus Metrics Scrape Endpoint (200 OK)
+GET {{baseUrl}}/metrics
+
+### 20. Monitoring - Live Circuit Breaker & Request Telemetry Snapshot (200 OK)
+GET {{baseUrl}}/monitoring/status
+Accept: application/json
+

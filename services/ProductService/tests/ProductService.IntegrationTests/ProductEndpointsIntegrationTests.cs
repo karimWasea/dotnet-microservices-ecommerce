@@ -518,6 +518,88 @@ public sealed class ProductEndpointsIntegrationTests(PostgresContainerFixture fi
             return new PagedResponse<ProductResponse>([], 1, 20, 0, 0);
         }
     }
+
+    [Fact]
+    public async Task MonitoringEndpoints_MetricsAndMonitoringStatus_ReturnTelemetryData()
+    {
+        // Trigger at least one request so counters are populated
+        await _client.GetAsync("/api/products");
+
+        var metricsResponse = await _client.GetAsync("/metrics");
+        Assert.Equal(HttpStatusCode.OK, metricsResponse.StatusCode);
+
+        var metricsText = await metricsResponse.Content.ReadAsStringAsync();
+        Assert.Contains("productservice_circuit_breaker_state 0", metricsText);
+        Assert.Contains("productservice_requests_total{status=\"succeeded\"}", metricsText);
+
+        var snapshot = await _client.GetFromJsonAsync<ProductService.Application.Monitoring.MonitoringSnapshot>(
+            "/monitoring/status");
+        Assert.NotNull(snapshot);
+        Assert.Equal("Closed", snapshot.CircuitState);
+        Assert.True(snapshot.TotalRequests >= 1);
+        Assert.True(snapshot.SucceededRequests >= 1);
+    }
+
+    [Fact]
+    public async Task CircuitBreaker_WhenDownstreamFailsRepeatedly_TripsOpenAndReturns503WithRetryAfterAndUnhealthyReadyProbe()
+    {
+        await using var cbFactory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("ConnectionStrings:ProductDb", fixture.Postgres.GetConnectionString());
+                builder.UseSetting("Database:SeedSampleData", "false");
+                builder.UseSetting("CircuitBreaker:MinimumThroughput", "2");
+                builder.UseSetting("CircuitBreaker:FailureRatio", "0.5");
+                builder.UseSetting("CircuitBreaker:BreakDurationSeconds", "30");
+                builder.ConfigureServices(services =>
+                {
+                    services.AddScoped<ProductService.Application.Abstractions.IProductReadService, FailingProductReadService>();
+                });
+            });
+
+        using var client = cbFactory.CreateClient();
+
+        // First 2 requests fail with 500 and trip the circuit breaker Open
+        var fail1 = await client.GetAsync("/api/products");
+        var fail2 = await client.GetAsync("/api/products");
+        Assert.Equal(HttpStatusCode.InternalServerError, fail1.StatusCode);
+        Assert.Equal(HttpStatusCode.InternalServerError, fail2.StatusCode);
+
+        // 3rd request is rejected immediately by the open circuit breaker with 503 Service Unavailable + Retry-After
+        var circuitOpenResponse = await client.GetAsync("/api/products");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, circuitOpenResponse.StatusCode);
+        Assert.True(circuitOpenResponse.Headers.Contains("Retry-After"));
+
+        var problem = await circuitOpenResponse.Content.ReadFromJsonAsync<ProblemDetails>();
+        Assert.NotNull(problem);
+        Assert.Equal(503, problem.Status);
+        Assert.Equal("Service Temporarily Unavailable", problem.Title);
+
+        // /monitoring/status reports CircuitState = "Open"
+        var status = await client.GetFromJsonAsync<ProductService.Application.Monitoring.MonitoringSnapshot>(
+            "/monitoring/status");
+        Assert.NotNull(status);
+        Assert.Equal("Open", status.CircuitState);
+        Assert.Equal(1, status.CircuitOpenedCount);
+        Assert.Equal(1, status.RejectedByCircuitBreakerRequests);
+
+        // /health/ready reports 503 ServiceUnavailable while the circuit is Open
+        var ready = await client.GetAsync("/health/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+    }
+
+    private sealed class FailingProductReadService
+        : ProductService.Application.Abstractions.IProductReadService
+    {
+        public Task<ProductResponse?> GetActiveByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Simulated database outage.");
+
+        public Task<PagedResponse<ProductResponse>> ListActiveAsync(
+            ProductService.Application.Products.Queries.ListProducts.ListProductsQuery query,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Simulated database outage.");
+    }
 }
+
 
 

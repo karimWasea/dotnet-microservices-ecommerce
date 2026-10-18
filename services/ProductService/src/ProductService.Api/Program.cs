@@ -5,6 +5,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using ProductService.Api.Endpoints;
 using ProductService.Api.Middleware;
 using ProductService.Application;
+using ProductService.Application.Monitoring;
 using ProductService.Domain.Abstractions;
 using ProductService.Domain.Products;
 using ProductService.Infrastructure;
@@ -14,7 +15,8 @@ using Scalar.AspNetCore;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddApplication();
+builder.Services.AddApplication(options =>
+    builder.Configuration.GetSection("CircuitBreaker").Bind(options));
 builder.Services.AddInfrastructure(builder.Configuration);
 
 builder.Services.AddProblemDetails();
@@ -61,6 +63,10 @@ builder.Services.AddHealthChecks()
     .AddDbContextCheck<ProductDbContext>(
         name: "productdb",
         failureStatus: HealthStatus.Unhealthy,
+        tags: ["ready"])
+    .AddCheck<CircuitBreakerHealthCheck>(
+        name: "circuit-breaker",
+        failureStatus: HealthStatus.Unhealthy,
         tags: ["ready"]);
 
 var app = builder.Build();
@@ -95,6 +101,18 @@ if (app.Environment.IsDevelopment())
 
 app.MapProductEndpoints();
 
+app.MapGet("/metrics", (ProductMetrics metrics) =>
+    Results.Text(metrics.FormatPrometheusMetrics(), "text/plain; version=0.0.4; charset=utf-8"))
+    .WithTags("Monitoring")
+    .WithName("GetPrometheusMetrics")
+    .WithSummary("Prometheus metrics scrape endpoint");
+
+app.MapGet("/monitoring/status", (ProductMetrics metrics) =>
+    TypedResults.Ok(metrics.GetSnapshot()))
+    .WithTags("Monitoring")
+    .WithName("GetMonitoringStatus")
+    .WithSummary("Live monitoring snapshot including circuit breaker state and request counters");
+
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("live")
@@ -107,4 +125,19 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 app.Run();
 
+public sealed class CircuitBreakerHealthCheck(ProductMetrics metrics) : IHealthCheck
+{
+    public Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(metrics.CircuitState switch
+        {
+            "Open" => HealthCheckResult.Unhealthy("Circuit breaker is OPEN."),
+            "HalfOpen" => HealthCheckResult.Degraded("Circuit breaker is HALF-OPEN."),
+            _ => HealthCheckResult.Healthy("Circuit breaker is CLOSED.")
+        });
+}
+
 public partial class Program;
+
+

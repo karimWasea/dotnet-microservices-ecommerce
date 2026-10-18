@@ -121,5 +121,82 @@ public sealed class ValidatorsAndBehaviorTests
 
         Assert.False(nextCalled);
     }
+
+    [Fact]
+    public async Task CircuitBreakerBehavior_WhenTransientFailuresExceedThreshold_OpensCircuitAndThrowsBrokenCircuitException()
+    {
+        using var metrics = new ProductService.Application.Monitoring.ProductMetrics();
+        var options = new ProductService.Application.Monitoring.CircuitBreakerOptions
+        {
+            FailureRatio = 0.5,
+            MinimumThroughput = 2,
+            SamplingDurationSeconds = 30,
+            BreakDurationSeconds = 30
+        };
+        var registry = new CircuitBreakerRegistry(
+            options,
+            metrics,
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CircuitBreakerRegistry>.Instance);
+        var behavior = new CircuitBreakerBehavior<CreateProductCommand, Guid>(registry, metrics);
+        var command = new CreateProductCommand("Keyboard", "Desc", "KB-001", 99.99m, "Peripherals");
+
+        RequestHandlerDelegate<Guid> failingNext = _ =>
+            throw new InvalidOperationException("Simulated database connection failure");
+
+        // 2 consecutive transient failures reach MinimumThroughput = 2 & FailureRatio = 1.0 -> trips circuit Open
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            behavior.Handle(command, failingNext, CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            behavior.Handle(command, failingNext, CancellationToken.None));
+
+        Assert.Equal("Open", metrics.CircuitState);
+        Assert.Equal(1, metrics.GetSnapshot().CircuitOpenedCount);
+
+        // Next request fails fast with BrokenCircuitException without invoking the handler
+        var handlerCalledWhenOpen = false;
+        RequestHandlerDelegate<Guid> healthyNext = _ =>
+        {
+            handlerCalledWhenOpen = true;
+            return Task.FromResult(Guid.NewGuid());
+        };
+
+        await Assert.ThrowsAsync<Polly.CircuitBreaker.BrokenCircuitException>(() =>
+            behavior.Handle(command, healthyNext, CancellationToken.None));
+
+        Assert.False(handlerCalledWhenOpen);
+        Assert.Equal(1, metrics.GetSnapshot().RejectedByCircuitBreakerRequests);
+    }
+
+    [Fact]
+    public async Task CircuitBreakerBehavior_WhenBusinessExceptionOccurs_DoesNotOpenCircuit()
+    {
+        using var metrics = new ProductService.Application.Monitoring.ProductMetrics();
+        var options = new ProductService.Application.Monitoring.CircuitBreakerOptions
+        {
+            FailureRatio = 0.5,
+            MinimumThroughput = 2,
+            SamplingDurationSeconds = 30,
+            BreakDurationSeconds = 30
+        };
+        var registry = new CircuitBreakerRegistry(
+            options,
+            metrics,
+            TimeProvider.System,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CircuitBreakerRegistry>.Instance);
+        var behavior = new CircuitBreakerBehavior<CreateProductCommand, Guid>(registry, metrics);
+        var command = new CreateProductCommand("Keyboard", "Desc", "KB-001", 99.99m, "Peripherals");
+
+        RequestHandlerDelegate<Guid> notFoundNext = _ =>
+            throw new ProductService.Application.Exceptions.NotFoundException("Not found");
+
+        await Assert.ThrowsAsync<ProductService.Application.Exceptions.NotFoundException>(() =>
+            behavior.Handle(command, notFoundNext, CancellationToken.None));
+        await Assert.ThrowsAsync<ProductService.Application.Exceptions.NotFoundException>(() =>
+            behavior.Handle(command, notFoundNext, CancellationToken.None));
+
+        Assert.Equal("Closed", metrics.CircuitState);
+    }
 }
+
 

@@ -1,6 +1,7 @@
 using FluentValidation;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Polly.CircuitBreaker;
 using ProductService.Application.Exceptions;
 using ProductService.Domain.Abstractions;
 
@@ -48,6 +49,10 @@ public sealed class GlobalExceptionHandler(
                 StatusCodes.Status422UnprocessableEntity,
                 "Domain Rule Violation",
                 "https://tools.ietf.org/html/rfc9110#section-15.5.21"),
+            BrokenCircuitException => (
+                StatusCodes.Status503ServiceUnavailable,
+                "Service Temporarily Unavailable",
+                "https://tools.ietf.org/html/rfc9110#section-15.6.4"),
             TimeoutException or OperationCanceledException => (
                 StatusCodes.Status504GatewayTimeout,
                 "Request Timeout",
@@ -77,6 +82,10 @@ public sealed class GlobalExceptionHandler(
         }
 
         httpContext.Response.StatusCode = statusCode;
+        if (exception is BrokenCircuitException)
+        {
+            httpContext.Response.Headers.RetryAfter = "15";
+        }
 
         ProblemDetails problemDetails;
 
@@ -99,14 +108,21 @@ public sealed class GlobalExceptionHandler(
         }
         else
         {
+            var detail = exception switch
+            {
+                BrokenCircuitException =>
+                    "The service is temporarily unavailable because the circuit breaker is open. Please retry shortly.",
+                _ when statusCode == StatusCodes.Status500InternalServerError =>
+                    "An unexpected error occurred.",
+                _ => exception.Message
+            };
+
             problemDetails = new ProblemDetails
             {
                 Status = statusCode,
                 Title = title,
                 Type = type,
-                Detail = statusCode == StatusCodes.Status500InternalServerError
-                    ? "An unexpected error occurred."
-                    : exception.Message,
+                Detail = detail,
                 Instance = httpContext.Request.Path
             };
 
