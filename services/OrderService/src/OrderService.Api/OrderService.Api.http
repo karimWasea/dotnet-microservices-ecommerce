@@ -1,0 +1,51 @@
+@baseUrl = http://localhost:5003
+@jwtToken = eyJhbGciOiJSUzI1NiIsImtpZCI6InVzZXJzZXJ2aWNlLT...
+
+### 1. Health - Liveness
+GET {{baseUrl}}/health/live
+
+### 2. Health - Readiness
+GET {{baseUrl}}/health/ready
+
+### 3. Place Order (Requires Idempotency-Key header & Customer JWT)
+POST {{baseUrl}}/api/orders
+Authorization: Bearer {{jwtToken}}
+Idempotency-Key: {{$guid}}
+Content-Type: application/json
+
+{
+  "shippingAddress": {
+    "recipientName": "Alice Customer",
+    "street": "123 Nile Corniche",
+    "city": "Cairo",
+    "country": "EG"
+  },
+  "items": [
+    {
+      "productId": "019a0010-3333-7000-8000-000000000003",
+      "quantity": 2
+    }
+  ],
+  "currency": "USD"
+}
+
+### 4. Get Order By Id
+GET {{baseUrl}}/api/orders/019a0100-1111-7000-8000-000000000001
+Authorization: Bearer {{jwtToken}}
+
+### 5. List My Orders
+GET {{baseUrl}}/api/orders/mine?page=1&pageSize=10
+Authorization: Bearer {{jwtToken}}
+
+### 6. List All Orders (Admin only)
+GET {{baseUrl}}/api/orders?page=1&pageSize=10
+Authorization: Bearer {{jwtToken}}
+
+### 7. Cancel Order
+POST {{baseUrl}}/api/orders/019a0100-1111-7000-8000-000000000001/cancel
+Authorization: Bearer {{jwtToken}}
+Content-Type: application/json
+
+{
+  "reason": "Customer requested cancellation"
+}

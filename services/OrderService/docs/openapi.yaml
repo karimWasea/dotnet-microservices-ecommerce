@@ -1,0 +1,516 @@
+openapi: 3.0.3
+info:
+  title: OrderService API
+  version: 1.0.0
+  description: |
+    Order management microservice for the E-Commerce platform (DDD, CQRS with separate write/read PostgreSQL databases, Transactional Outbox/Inbox, RabbitMQ Choreography Saga, and HTTP Resilience).
+
+    **Eventual Consistency Note**:
+    - Write operations (`POST /api/orders`, `POST /api/orders/{id}/cancel`) commit to the write database (`orderdb`) and enqueue events in `outbox_messages`.
+    - Read operations (`GET /api/orders/{id}`, `GET /api/orders/my`, `GET /api/orders`) query the separate read database (`orderreaddb`), which is updated asynchronously by `OrderReadModelProjector` within milliseconds.
+    - `POST /api/orders` returns the created order directly from the write side. Calling `GET /api/orders/{id}` immediately after `POST /api/orders` may briefly return `404 Not Found` until the read model projection completes; clients should retry on `404`.
+servers:
+  - url: http://localhost:5003
+    description: Local Development Server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /api/orders:
+    post:
+      tags: [Orders]
+      summary: Place a new order (idempotent via Idempotency-Key header)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated idempotency key (1-64 chars from A-Z, a-z, 0-9, ., _, -).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderRequest'
+      responses:
+        '201':
+          description: Order placed (or replayed if Idempotency-Replayed header is true).
+          headers:
+            Location:
+              schema:
+                type: string
+            Idempotency-Replayed:
+              description: Present and set to "true" when a previous response for the same Idempotency-Key and payload was replayed.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacedOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '422':
+          $ref: '#/components/responses/DomainProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailableProblem'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutProblem'
+
+    get:
+      tags: [Orders]
+      summary: List all orders (Admin only, reads from orderreaddb)
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [Pending, StockReserved, Confirmed, Rejected, Cancelled]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [placedAt, total]
+            default: placedAt
+        - name: sortDir
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Paged order summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedOrderSummariesResponse'
+        '400':
+          $ref: '#/components/responses/ValidationProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '403':
+          $ref: '#/components/responses/ForbiddenProblem'
+
+  /api/orders/my:
+    get:
+      tags: [Orders]
+      summary: List current authenticated user's orders (reads from orderreaddb)
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [Pending, StockReserved, Confirmed, Rejected, Cancelled]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [placedAt, total]
+            default: placedAt
+        - name: sortDir
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Paged order summaries for the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedOrderSummariesResponse'
+        '400':
+          $ref: '#/components/responses/ValidationProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+
+  /api/orders/{id}:
+    get:
+      tags: [Orders]
+      summary: Get order details by ID (owner or Admin, reads from orderreaddb)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order details with status history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderDetailsResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+
+  /api/orders/{id}/cancel:
+    post:
+      tags: [Orders]
+      summary: Cancel an order (owner or Admin)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelOrderRequest'
+      responses:
+        '204':
+          description: Order cancelled (or already cancelled).
+        '400':
+          $ref: '#/components/responses/ValidationProblem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedProblem'
+        '404':
+          $ref: '#/components/responses/NotFoundProblem'
+        '409':
+          $ref: '#/components/responses/ConflictProblem'
+        '422':
+          $ref: '#/components/responses/DomainProblem'
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe (orderdb + orderreaddb + RabbitMQ + outbox lag)
+      security: []
+      responses:
+        '200':
+          description: Ready (Healthy or Degraded).
+        '503':
+          description: Unhealthy.
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PlaceOrderRequest:
+      type: object
+      required: [items, shippingAddress]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/PlaceOrderItemRequest'
+        shippingAddress:
+          $ref: '#/components/schemas/AddressDto'
+
+    PlaceOrderItemRequest:
+      type: object
+      required: [productId, quantity]
+      properties:
+        productId:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 100
+
+    AddressDto:
+      type: object
+      required: [recipientName, street, city, country]
+      properties:
+        recipientName:
+          type: string
+          maxLength: 100
+        street:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+
+    CancelOrderRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          nullable: true
+
+    OrderLineResponse:
+      type: object
+      required: [productId, productName, unitPrice, quantity, lineTotal]
+      properties:
+        productId:
+          type: string
+          format: uuid
+        productName:
+          type: string
+        unitPrice:
+          type: number
+          format: decimal
+        quantity:
+          type: integer
+        lineTotal:
+          type: number
+          format: decimal
+
+    PlacedOrderResponse:
+      type: object
+      required: [orderId, status, items, shippingAddress, total, currency, placedAtUtc]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        status:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderLineResponse'
+        shippingAddress:
+          $ref: '#/components/schemas/AddressDto'
+        total:
+          type: number
+          format: decimal
+        currency:
+          type: string
+        placedAtUtc:
+          type: string
+          format: date-time
+
+    OrderSummaryResponse:
+      type: object
+      required: [orderId, userId, status, total, currency, itemCount, placedAtUtc, updatedAtUtc]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        status:
+          type: string
+        total:
+          type: number
+          format: decimal
+        currency:
+          type: string
+        itemCount:
+          type: integer
+        placedAtUtc:
+          type: string
+          format: date-time
+        updatedAtUtc:
+          type: string
+          format: date-time
+
+    OrderStatusHistoryEntry:
+      type: object
+      required: [status, atUtc]
+      properties:
+        status:
+          type: string
+        atUtc:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          nullable: true
+
+    OrderDetailsResponse:
+      type: object
+      required: [orderId, userId, status, items, shippingAddress, total, currency, placedAtUtc, updatedAtUtc, history]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        status:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderLineResponse'
+        shippingAddress:
+          $ref: '#/components/schemas/AddressDto'
+        total:
+          type: number
+          format: decimal
+        currency:
+          type: string
+        placedAtUtc:
+          type: string
+          format: date-time
+        updatedAtUtc:
+          type: string
+          format: date-time
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderStatusHistoryEntry'
+
+    PagedOrderSummariesResponse:
+      type: object
+      required: [items, page, pageSize, totalCount, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderSummaryResponse'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        totalCount:
+          type: integer
+        totalPages:
+          type: integer
+
+    ProblemDetails:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          nullable: true
+
+  responses:
+    ValidationProblem:
+      description: Validation failed (400).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    UnauthorizedProblem:
+      description: Unauthorized (401).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ForbiddenProblem:
+      description: Forbidden (403).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFoundProblem:
+      description: Resource not found or not owned by caller (404).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ConflictProblem:
+      description: Idempotency key conflict or concurrency conflict (409).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    DomainProblem:
+      description: Domain rule violation or product unavailable (422).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ServiceUnavailableProblem:
+      description: Downstream dependency unavailable / circuit open (503).
+      headers:
+        Retry-After:
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    GatewayTimeoutProblem:
+      description: Request or dependency timeout (504).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'

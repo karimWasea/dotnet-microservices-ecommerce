@@ -1,3 +1,4 @@
 CREATE DATABASE productdb;
 CREATE DATABASE userdb;
 CREATE DATABASE orderdb;
+CREATE DATABASE orderreaddb;

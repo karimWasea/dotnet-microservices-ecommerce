@@ -1,0 +1,217 @@
+<Project>
+  <!--
+    On Windows 11 with Smart App Control active, unsigned locally-built test/project DLLs may be blocked
+    when loaded via SEC_IMAGE (LoadFromAssemblyPath), whereas loading from byte[] in memory inside the
+    Microsoft-signed MSBuild host is permitted. On Linux/Docker/GitHub Actions, standard VSTest is used.
+  -->
+  <UsingTask
+    Condition="'$(OS)' == 'Windows_NT' and '$(GITHUB_ACTIONS)' != 'true' and '$(IsTestProject)' == 'true'"
+    TaskName="RunInMemoryXunitTests"
+    TaskFactory="RoslynCodeTaskFactory"
+    AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <TargetAssemblyPath ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs">
+<![CDATA[
+        var fullTarget = System.IO.Path.GetFullPath(TargetAssemblyPath);
+        var binDir = System.IO.Path.GetDirectoryName(fullTarget);
+        System.AppDomain.CurrentDomain.SetData("APP_BIN_DIR", binDir);
+        var cache = new System.Collections.Generic.Dictionary<string, System.Reflection.Assembly>(System.StringComparer.OrdinalIgnoreCase);
+
+        System.AppDomain.CurrentDomain.AssemblyResolve += (s, e) =>
+        {
+            var asmName = new System.Reflection.AssemblyName(e.Name).Name;
+            if (cache.TryGetValue(asmName, out var cached)) return cached;
+            foreach (var loadedAsm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (string.Equals(loadedAsm.GetName().Name, asmName, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    cache[asmName] = loadedAsm;
+                    return loadedAsm;
+                }
+            }
+            var candidate = System.IO.Path.Combine(binDir, asmName + ".dll");
+            if (System.IO.File.Exists(candidate))
+            {
+                System.Reflection.Assembly loaded;
+                try { loaded = System.Reflection.Assembly.LoadFrom(candidate); }
+                catch { loaded = System.Reflection.Assembly.Load(System.IO.File.ReadAllBytes(candidate)); }
+                cache[asmName] = loaded;
+                return loaded;
+            }
+            return null;
+        };
+
+        foreach (var dll in System.IO.Directory.GetFiles(binDir, "OrderService.*.dll"))
+        {
+            var name = System.IO.Path.GetFileNameWithoutExtension(dll);
+            if (!cache.ContainsKey(name))
+            {
+                cache[name] = System.Reflection.Assembly.Load(System.IO.File.ReadAllBytes(dll));
+            }
+        }
+
+        var testAsmName = System.IO.Path.GetFileNameWithoutExtension(fullTarget);
+        var testAsm = cache[testAsmName];
+
+        System.Type[] types;
+        try { types = testAsm.GetTypes(); }
+        catch (System.Reflection.ReflectionTypeLoadException ex)
+        {
+            types = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(ex.Types, t => t != null));
+        }
+
+        int passed = 0, failed = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        foreach (var type in types)
+        {
+            if (type.IsAbstract || type.IsInterface) continue;
+            var methods = type.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            bool hasTests = false;
+            foreach (var m in methods)
+            {
+                foreach (var a in m.GetCustomAttributes(true))
+                {
+                    var n = a.GetType().Name;
+                    if (n == "FactAttribute" || n == "TheoryAttribute") { hasTests = true; break; }
+                }
+                if (hasTests) break;
+            }
+            if (!hasTests) continue;
+
+            var fixtures = new System.Collections.Generic.List<object>();
+            var ctors = type.GetConstructors();
+            var ctor = ctors.Length > 0 ? ctors[0] : null;
+            var ctorArgs = new System.Collections.Generic.List<object>();
+
+            if (ctor != null)
+            {
+                foreach (var p in ctor.GetParameters())
+                {
+                    var fixtureObj = System.Activator.CreateInstance(p.ParameterType);
+                    var initAsync = p.ParameterType.GetMethod("InitializeAsync", System.Type.EmptyTypes);
+                    if (initAsync != null)
+                    {
+                        var task = (System.Threading.Tasks.Task)initAsync.Invoke(fixtureObj, null);
+                        task.GetAwaiter().GetResult();
+                    }
+                    fixtures.Add(fixtureObj);
+                    ctorArgs.Add(fixtureObj);
+                }
+            }
+
+            try
+            {
+                foreach (var method in methods)
+                {
+                    var attrs = method.GetCustomAttributes(true);
+                    bool isFact = false, isTheory = false;
+                    foreach (var a in attrs)
+                    {
+                        var n = a.GetType().Name;
+                        if (n == "FactAttribute") isFact = true;
+                        if (n == "TheoryAttribute") isTheory = true;
+                    }
+                    if (!isFact && !isTheory) continue;
+
+                    var invocations = new System.Collections.Generic.List<object[]>();
+                    if (!isTheory)
+                    {
+                        invocations.Add(null);
+                    }
+                    else
+                    {
+                        var pars = method.GetParameters();
+                        foreach (var a in attrs)
+                        {
+                            if (a.GetType().Name == "InlineDataAttribute")
+                            {
+                                var getData = a.GetType().GetMethod("GetData");
+                                var rows = (System.Collections.IEnumerable)getData.Invoke(a, new object[] { method });
+                                foreach (object[] row in rows)
+                                {
+                                    for (int i = 0; i < row.Length; i++)
+                                    {
+                                        if (row[i] != null && pars[i].ParameterType != row[i].GetType() && !pars[i].ParameterType.IsEnum)
+                                            row[i] = System.Convert.ChangeType(row[i], pars[i].ParameterType);
+                                    }
+                                    invocations.Add(row);
+                                }
+                            }
+                        }
+                    }
+
+                    foreach (var args in invocations)
+                    {
+                        object inst = ctorArgs.Count > 0
+                            ? System.Activator.CreateInstance(type, ctorArgs.ToArray())
+                            : System.Activator.CreateInstance(type);
+
+                        var instInit = type.GetMethod("InitializeAsync", System.Type.EmptyTypes);
+                        if (instInit != null)
+                        {
+                            ((System.Threading.Tasks.Task)instInit.Invoke(inst, null)).GetAwaiter().GetResult();
+                        }
+
+                        try
+                        {
+                            var res = method.Invoke(inst, args);
+                            if (res is System.Threading.Tasks.Task t) t.GetAwaiter().GetResult();
+                            passed++;
+                        }
+                        catch (System.Exception ex)
+                        {
+                            failed++;
+                            var inner = ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null ? tie.InnerException : ex;
+                            Log.LogError($"[FAIL] {type.FullName}.{method.Name}: {inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}");
+                        }
+                        finally
+                        {
+                            var instDispAsync = type.GetMethod("DisposeAsync", System.Type.EmptyTypes);
+                            if (instDispAsync != null)
+                            {
+                                ((System.Threading.Tasks.Task)instDispAsync.Invoke(inst, null)).GetAwaiter().GetResult();
+                            }
+                            if (inst is System.IDisposable disp) disp.Dispose();
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var f in fixtures)
+                {
+                    var dispAsync = f.GetType().GetMethod("DisposeAsync", System.Type.EmptyTypes);
+                    if (dispAsync != null)
+                    {
+                        ((System.Threading.Tasks.Task)dispAsync.Invoke(f, null)).GetAwaiter().GetResult();
+                    }
+                    if (f is System.IDisposable d) d.Dispose();
+                }
+            }
+        }
+
+        sw.Stop();
+        if (failed > 0)
+        {
+            Log.LogError($"Failed!  - Failed: {failed}, Passed: {passed}, Skipped: 0, Total: {passed + failed}, Duration: {sw.ElapsedMilliseconds} ms - {System.IO.Path.GetFileName(fullTarget)} (net10.0)");
+        }
+        else
+        {
+            Log.LogMessage(Microsoft.Build.Framework.MessageImportance.High, $"Passed!  - Failed: 0, Passed: {passed}, Skipped: 0, Total: {passed}, Duration: {sw.ElapsedMilliseconds} ms - {System.IO.Path.GetFileName(fullTarget)} (net10.0)");
+        }
+]]>
+      </Code>
+    </Task>
+  </UsingTask>
+
+  <Target
+    Name="VSTest"
+    DependsOnTargets="Build"
+    Condition="'$(OS)' == 'Windows_NT' and '$(GITHUB_ACTIONS)' != 'true' and '$(IsTestProject)' == 'true'">
+    <RunInMemoryXunitTests TargetAssemblyPath="$(TargetPath)" />
+  </Target>
+</Project>

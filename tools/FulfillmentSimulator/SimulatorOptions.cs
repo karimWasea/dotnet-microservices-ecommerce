@@ -1,0 +1,16 @@
+namespace FulfillmentSimulator;
+
+public sealed class SimulatorOptions
+{
+    public const string SectionName = "Simulator";
+
+    public string Host { get; set; } = "localhost";
+    public int Port { get; set; } = 5672;
+    public string VirtualHost { get; set; } = "/";
+    public string Username { get; set; } = "guest";
+    public string Password { get; set; } = "guest";
+    public string ExchangeName { get; set; } = "ecommerce.events";
+    public string DeadLetterExchangeName { get; set; } = "ecommerce.events.dlx";
+    public string QueueName { get; set; } = "simulator.orders";
+    public int StepDelayMs { get; set; } = 500;
+}

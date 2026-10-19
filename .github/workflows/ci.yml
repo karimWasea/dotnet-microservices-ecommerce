@@ -59,6 +59,24 @@ jobs:
       - name: Run UserService Integration Tests (Testcontainers PostgreSQL 17)
         run: dotnet test services/UserService/tests/UserService.IntegrationTests/UserService.IntegrationTests.csproj --configuration Release --no-build --verbosity normal
 
+      - name: Restore OrderService
+        run: dotnet restore services/OrderService/OrderService.slnx
+
+      - name: Build OrderService (Release)
+        run: dotnet build services/OrderService/OrderService.slnx --configuration Release --no-restore
+
+      - name: Run OrderService Unit & Architecture Tests
+        run: dotnet test services/OrderService/tests/OrderService.UnitTests/OrderService.UnitTests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Run OrderService Integration Tests (Testcontainers PostgreSQL 17)
+        run: dotnet test services/OrderService/tests/OrderService.IntegrationTests/OrderService.IntegrationTests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Restore FulfillmentSimulator
+        run: dotnet restore tools/FulfillmentSimulator/FulfillmentSimulator.csproj
+
+      - name: Build FulfillmentSimulator (Release)
+        run: dotnet build tools/FulfillmentSimulator/FulfillmentSimulator.csproj --configuration Release --no-restore
+
   docker-build:
     name: Validate Docker Build & Compose
     runs-on: ubuntu-latest
@@ -76,3 +94,9 @@ jobs:
 
       - name: Build UserService Docker image
         run: docker build -t user-service:ci ./services/UserService
+
+      - name: Build OrderService Docker image
+        run: docker build -t order-service:ci ./services/OrderService
+
+      - name: Build FulfillmentSimulator Docker image
+        run: docker build -t fulfillment-simulator:ci ./tools/FulfillmentSimulator

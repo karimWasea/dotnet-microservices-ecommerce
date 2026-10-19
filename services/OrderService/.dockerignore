@@ -1,0 +1,12 @@
+**/.git
+**/.vs
+**/.vscode
+**/bin
+**/obj
+**/TestResults
+.env
+docs/
+tests/
+*.md
+*.user
+Directory.Build.targets

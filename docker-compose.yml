@@ -17,6 +17,26 @@ services:
       timeout: 5s
       retries: 5
 
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: ecommerce-rabbitmq
+    restart: unless-stopped
+    environment:
+      # DEV ONLY credentials for local learning
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-ecommerce}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:-ecommerce_dev_pass}"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   product-service:
     build:
       context: ./services/ProductService
@@ -62,6 +82,57 @@ services:
       retries: 5
       start_period: 10s
 
+  order-service:
+    build:
+      context: ./services/OrderService
+      dockerfile: Dockerfile
+    container_name: ecommerce-order-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__OrderWriteDb: "Host=postgres;Port=5432;Database=orderdb;Username=postgres;Password=postgres"
+      ConnectionStrings__OrderReadDb: "Host=postgres;Port=5432;Database=orderreaddb;Username=postgres;Password=postgres"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Port: "5672"
+      RabbitMq__Username: "${RABBITMQ_USER:-ecommerce}"
+      RabbitMq__Password: "${RABBITMQ_PASSWORD:-ecommerce_dev_pass}"
+      ProductCatalog__BaseUrl: "http://product-service:8080"
+      JwtAuth__JwksUrl: "http://user-service:8080/.well-known/jwks.json"
+    ports:
+      - "5003:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  fulfillment-simulator:
+    build:
+      context: ./tools/FulfillmentSimulator
+      dockerfile: Dockerfile
+    container_name: ecommerce-fulfillment-simulator
+    restart: unless-stopped
+    profiles: ["simulator"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      Simulator__Host: "rabbitmq"
+      Simulator__Port: "5672"
+      Simulator__Username: "${RABBITMQ_USER:-ecommerce}"
+      Simulator__Password: "${RABBITMQ_PASSWORD:-ecommerce_dev_pass}"
+
   prometheus:
     image: prom/prometheus:v3.2.1
     container_name: ecommerce-prometheus
@@ -69,6 +140,7 @@ services:
     depends_on:
       - product-service
       - user-service
+      - order-service
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -76,3 +148,4 @@ services:
 
 volumes:
   postgres_data:
+  rabbitmq_data:
